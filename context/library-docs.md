@@ -545,7 +545,16 @@ const response = await openai.chat.completions.create({
   ],
 });
 
-const result = JSON.parse(response.choices[0].message.content!);
+const choice = response.choices[0];
+
+// Guard before you parse. A "length" finish means the model ran out of output
+// budget and the JSON is cut off mid-value, so JSON.parse throws. Raise
+// max_tokens or shorten the input, then retry. Never parse a cut-off response.
+if (choice.finish_reason === "length") {
+  throw new Error("AI response was cut off. Raise max_tokens or shorten the input.");
+}
+
+const result = JSON.parse(choice.message.content!);
 ```
 
 **Temperature settings:**
@@ -558,16 +567,134 @@ const result = JSON.parse(response.choices[0].message.content!);
 - Job matching + scoring: `300`
 - Company research synthesis: `800`
 - Resume generation: `1000`
-- Profile extraction from resume: `800`
+- Profile extraction from resume: `4000` — a full profile (work history, education, skill arrays) does not fit in less. The old `800` cap cut the JSON off mid-value, so `JSON.parse` threw ("Unterminated string in JSON", "Expected double-quoted property name"). No cap removes truncation for every input, so always check `finish_reason` before you parse (see the rules below and the Profile Extraction pattern).
 
 **Rules:**
 
 - Model string is always `'gpt-4o'` — never use other model names
-- Always use `response_format: { type: 'json_object' }` for structured data
+- Always set `response_format` for structured data — `{ type: 'json_object' }` for free-form synthesis, strict `json_schema` when the parsed shape must be exact (profile extraction — see the pattern below)
+- Always check `finish_reason` before `JSON.parse` — a `length` finish means the output was truncated and the JSON is incomplete. Treat it as a clean, retryable error; never feed it to `JSON.parse`
 - Always parse `response.choices[0].message.content` as string — even with json_object it returns a string
 - Always validate parsed JSON before using — wrap in try/catch
 - Match threshold is always `MATCH_THRESHOLD` from `lib/utils.ts` — never hardcode 70
 - Company research synthesis must always return a complete dossier — never return empty even if browser research failed
+
+---
+
+### Profile Extraction from Resume
+
+This is the one call whose response shape must be exact — the parsed object feeds
+straight into the profile form fields. Two faults made it crash in local dev, and
+both are fixed here:
+
+- **Truncation.** The `800` token cap cut a real resume's profile off mid-value, so `JSON.parse` threw. Raise the cap **and** guard `finish_reason` — no cap alone is safe.
+- **Shape drift.** `json_object` promises valid JSON, not the right keys. A strict `json_schema` makes the returned shape deterministic.
+
+```typescript
+import OpenAI from "openai";
+
+const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY! });
+
+// Thrown when the resume is too long for the model to finish the JSON.
+// The caller shows: "This resume is too long to read in full. Try a shorter file."
+export class ResumeTooLongError extends Error {
+  constructor() {
+    super("Resume extraction was cut off before the profile was complete.");
+    this.name = "ResumeTooLongError";
+  }
+}
+
+const response = await openai.chat.completions.create({
+  model: "gpt-4o",
+  temperature: 0.3,
+  max_tokens: 4000, // a full profile does not fit in less — see Max tokens above
+  response_format: {
+    type: "json_schema",
+    json_schema: {
+      name: "resume_profile",
+      strict: true,
+      schema: {
+        type: "object",
+        additionalProperties: false,
+        properties: {
+          full_name: { type: ["string", "null"] },
+          email: { type: ["string", "null"] },
+          phone: { type: ["string", "null"] },
+          location: { type: ["string", "null"] },
+          current_title: { type: ["string", "null"] },
+          experience_level: {
+            type: ["string", "null"],
+            enum: ["junior", "mid", "senior", "lead", null],
+          },
+          years_experience: { type: ["integer", "null"] },
+          skills: { type: "array", items: { type: "string" } },
+          industries: { type: "array", items: { type: "string" } },
+          work_experience: {
+            type: "array",
+            items: {
+              type: "object",
+              additionalProperties: false,
+              properties: {
+                company: { type: "string" },
+                title: { type: "string" },
+                start_date: { type: ["string", "null"] },
+                end_date: { type: ["string", "null"] },
+                highlights: { type: "array", items: { type: "string" } },
+              },
+              required: ["company", "title", "start_date", "end_date", "highlights"],
+            },
+          },
+          education: {
+            type: "array",
+            items: {
+              type: "object",
+              additionalProperties: false,
+              properties: {
+                degree: { type: ["string", "null"] },
+                field: { type: ["string", "null"] },
+                institution: { type: ["string", "null"] },
+                year: { type: ["string", "null"] },
+              },
+              required: ["degree", "field", "institution", "year"],
+            },
+          },
+        },
+        required: [
+          "full_name", "email", "phone", "location", "current_title",
+          "experience_level", "years_experience", "skills", "industries",
+          "work_experience", "education",
+        ],
+      },
+    },
+  },
+  messages: [
+    {
+      role: "system",
+      content:
+        "You extract a candidate profile from resume text. Fill every field you can from the text. Use null for anything the resume does not state — never invent a value.",
+    },
+    { role: "user", content: resumeText },
+  ],
+});
+
+const choice = response.choices[0];
+
+// Guard before JSON.parse. A truncated response is incomplete JSON, not a
+// parse bug — surface it as a clean error instead of letting the parse throw.
+if (choice.finish_reason === "length") {
+  throw new ResumeTooLongError();
+}
+
+const profile = JSON.parse(choice.message.content!);
+```
+
+**Rules:**
+
+- Use strict `json_schema` for this call — not `json_object`. The parsed object maps straight onto profile form fields, so the shape must be deterministic
+- With `strict: true`, every property must appear in `required`. Make a field optional by allowing `null` in its type, not by leaving it out
+- Check `finish_reason === "length"` before `JSON.parse` and surface it as `ResumeTooLongError` — never parse a cut-off response
+- `max_tokens` is `4000` here — enough for a full profile. The `finish_reason` guard still stands, because no cap removes truncation for every input
+- The model fills only what the resume states, and null for the rest. Preferences (remote preference, salary, cover letter tone) are user choices, not resume data — leave them out of extraction
 
 ---
 
