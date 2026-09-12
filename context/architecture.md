@@ -414,7 +414,10 @@ const stagehand = new Stagehand({
   projectId: process.env.FIRECRAWL_PROJECT_ID!,
   firecrawlSessionID: session.id,
   modelName: "gpt-4o",
-  modelClientOptions: { apiKey: process.env.OPENAI_API_KEY! },
+  modelClientOptions: {
+    apiKey: process.env.OPENROUTER_API_KEY!,
+    baseURL: "https://openrouter.ai/api/v1",
+  },
 });
 
 await stagehand.init();
