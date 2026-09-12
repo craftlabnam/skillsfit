@@ -55,6 +55,7 @@ Update this file after every completed feature. Any AI agent reading this should
 - Added a `.hero-gradient` utility class in `globals.css` for the hero/bottom-CTA pastel blob background, composed entirely from existing `--color-info-light` / `--color-accent-light` / `--color-accent-muted` tokens — no new hex values introduced.
 - Get Started / Find Your First Match / Start for free all link to `/login` for now (no auth session exists yet — Phase 1 Feature 02). Revisit once auth lands to branch authenticated users to `/dashboard`.
 - Navbar/Footer link to `/dashboard`, `/find-jobs`, `/profile` even though those routes aren't built yet — matches architecture.md's planned structure.
+- Added `serverExternalPackages: ["pdf-parse", "pdfjs-dist"]` to `next.config.ts` ahead of Feature 07. Without it Next bundles `pdfjs-dist` into the SSR chunks, which splits it from the worker file next to it in `node_modules`, so pdf.js fails to load the worker (`Setting up fake worker failed`). This blocks the `pdf-parse` 2.x line the resume text extraction depends on. Also corrected the `pdf-parse` snippet in `library-docs.md` to the 2.x `PDFParse` class API (the 1.x default-export `pdf(buffer)` shape does not exist in the 2.x line that pulls in `pdfjs-dist`).
 
 ---
 

@@ -1,7 +1,9 @@
 import type { NextConfig } from "next";
 
 const nextConfig: NextConfig = {
-  /* config options here */
+  // Keep pdfjs-dist next to its worker file in node_modules; bundling it into
+  // the SSR chunks makes the pdf.js worker fail to load at runtime.
+  serverExternalPackages: ["pdf-parse", "pdfjs-dist"],
   async rewrites() {
     return [
       {
