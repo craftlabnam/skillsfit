@@ -326,7 +326,11 @@ const stagehand = new Stagehand({
   apiKey: process.env.FIRECRAWL_API_KEY!,
   projectId: process.env.FIRECRAWL_PROJECT_ID!,
   firecrawlSessionID: session.id,
-  model: { modelName: "openai/gpt-4o", apiKey: process.env.OPENAI_API_KEY! },
+  model: {
+    modelName: "openai/gpt-4o",
+    apiKey: process.env.OPENROUTER_API_KEY!,
+    baseURL: "https://openrouter.ai/api/v1",
+  },
   disablePino: true,
 });
 
@@ -518,19 +522,24 @@ const response = await openai.chat.completions.create({
 - If browser research returns empty — still run synthesis with job + profile only
 - yourEdge, gapsToAddress, and smartQuestions are the most valuable fields — never skip them
 
-## OpenAI GPT-4o
+## Model calls (OpenRouter, OpenAI-compatible)
 
-**Check first:** Check AGENTS.md for an installed OpenAI skill. The skill will have the latest API patterns and model capabilities.
+**Check first:** Check AGENTS.md for an installed OpenAI or OpenRouter skill. The skill will have the latest API patterns and model capabilities.
+
+All model calls go through the InsForge-provisioned OpenRouter key, never the direct OpenAI API. OpenRouter is OpenAI-compatible, so the OpenAI SDK works with a custom `baseURL`. The direct OpenAI account is unfunded and answers every call with `429 You have no credits remaining`.
 
 ### Structured JSON Response
 
 ```typescript
 import OpenAI from "openai";
 
-const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY! });
+const openrouter = new OpenAI({
+  baseURL: "https://openrouter.ai/api/v1",
+  apiKey: process.env.OPENROUTER_API_KEY!,
+});
 
-const response = await openai.chat.completions.create({
-  model: "gpt-4o",
+const response = await openrouter.chat.completions.create({
+  model: "openai/gpt-4o",
   response_format: { type: "json_object" },
   temperature: 0.3,
   messages: [
@@ -548,6 +557,34 @@ const response = await openai.chat.completions.create({
 const result = JSON.parse(response.choices[0].message.content!);
 ```
 
+### Quota and rate-limit handling (429)
+
+A model call can fail with `429` — no credits left or the rate limit is hit. Catch it, log it, and return a readable message. Never let the `429` escape as an unhandled exception that crashes the agent function or the action that called it.
+
+```typescript
+try {
+  const response = await openrouter.chat.completions.create({
+    /* ... */
+  });
+  return {
+    success: true,
+    data: JSON.parse(response.choices[0].message.content!),
+  };
+} catch (error) {
+  await logAgentError(runId, null, error);
+  if (error instanceof OpenAI.APIError && error.status === 429) {
+    return {
+      success: false,
+      error: "AI is temporarily over capacity. Please try again in a few minutes.",
+    };
+  }
+  return {
+    success: false,
+    error: "Could not complete the AI request. Please try again.",
+  };
+}
+```
+
 **Temperature settings:**
 
 - `0.3` — matching, scoring, extraction, research synthesis — deterministic results
@@ -562,7 +599,9 @@ const result = JSON.parse(response.choices[0].message.content!);
 
 **Rules:**
 
-- Model string is always `'gpt-4o'` — never use other model names
+- Client always points at OpenRouter — `baseURL: 'https://openrouter.ai/api/v1'` with `process.env.OPENROUTER_API_KEY`. Never call the direct OpenAI API (`new OpenAI({ apiKey: process.env.OPENAI_API_KEY })`) — that account is unfunded and returns `429 no credits remaining`
+- Model string is always `'openai/gpt-4o'` (OpenRouter route prefix) — never `'gpt-4o'` or other model names
+- Always catch `OpenAI.APIError` — on `status === 429` log it and return a readable "over capacity" message; never let the quota error escape the agent function or action
 - Always use `response_format: { type: 'json_object' }` for structured data
 - Always parse `response.choices[0].message.content` as string — even with json_object it returns a string
 - Always validate parsed JSON before using — wrap in try/catch
